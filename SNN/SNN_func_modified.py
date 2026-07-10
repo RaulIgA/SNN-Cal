@@ -160,10 +160,10 @@ class Predictor():
 
 ###############################################################################
 ##                                                                           ##
-##     MULTIPLE TASK LOSS FUNCTION
+##     MULTIPLE TASK LOSS FUNCTION                                           ##
 ##                                                                           ##
 ###############################################################################
-    
+
 class multi_MSELoss(torch.nn.Module):
 
     def __init__(self, reduction: str = "mean", weights : torch.tensor = torch.ones(1),
@@ -238,14 +238,19 @@ class Trainer():
             for data, targets in dataset:
 
                 data = data.to(device)
+
+                if isinstance(targets, list):                                             
+                    targets = targets[0]  
+
                 targets = targets.to(device)
 
+                targets = targets.to(device)
                 # forward pass
                 output = self.net(data)
                 pred, acc = self.predict(output, targets)
 
                 # compute loss
-                loss = self.loss_fn(output, targets)            #CAMBIO AQUI!!! Antes era self.loss_fn(pred,targets)
+                loss = self.loss_fn(output, targets)            
                 temp_loss.append(loss.item())
                 
                 #Añadido Raul
@@ -280,6 +285,10 @@ class Trainer():
             # Minibatch training loop
             for data, targets in tqdm(self.datasets["train"], desc="Batches", leave=False):
                 data = data.to(device)
+                if isinstance(targets, list):                   
+                    targets = targets[0]  
+
+                
                 targets = targets.to(device)
 
                 # forward pass
@@ -287,7 +296,7 @@ class Trainer():
                 pred, _ = self.predict(output, targets)
 
                 # compute loss
-                loss_val = self.loss_fn(output, targets)          #CAMBIO AQUI!!! Antes era self.loss_fn(pred, targets)
+                loss_val = self.loss_fn(output, targets)          
 
                 # Gradient calculation + weight update
                 self.optimizer.zero_grad()
@@ -335,13 +344,14 @@ class Trainer():
 
     
     def ConfusionMatrix(self, *args, **kwargs):
-        #He añadido .to(device)
         cm = MulticlassConfusionMatrix(*args, **kwargs).to(device)
 
         self.net.eval()
         with torch.no_grad():
             for data, targets in self.datasets["test"]:
                 data = data.to(device)
+                if isinstance(targets, list):                   
+                    targets = targets[0]  
                 targets = targets.to(device)
 
                 # forward pass
@@ -378,7 +388,6 @@ class Trainer():
         all_predictions = torch.cat(all_predictions, dim=0)
         all_accuracy = torch.cat(all_accuracy, dim=0)
         
-        #Añadido
         if len(all_predictions.shape) > len(all_targets.shape):
             all_predictions = all_predictions.argmax(dim=-1)
 

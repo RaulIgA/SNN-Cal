@@ -24,21 +24,14 @@ max_t = 20
 dt = 0.2
 timesteps = int(max_t/dt)
 batch_size = 50
-num_epochs = 4
+num_epochs = 50
 idx = 100  
-'''
-labels_map = {
-  -1: "unclassified",
-   0: "proton",
-   1: "kaon",
-   2: "pion",
-   3: "other"
-}
-'''
+
 labels_map = {
    0: "proton",
    1: "kaon",
    2: "pion"}
+
 nClasses = len(labels_map)
 
 
@@ -104,19 +97,14 @@ def spikegen_multi(data, multiplicity=4):
 
 
 def predict_spikefreq(output):
-    return output
+    return output[0]
 
-def comp_accuracy(output, targets, *args, **kwargs):
-    #_, predicted = output.max(1) 
-    predicted = output.argmax(dim=1)
-    correct = (predicted == targets).to(torch.float32)
-
-    return correct
 
 
 class Hybrid_Net(nn.Module):
     def __init__(self, snn_network):
         super().__init__()
+        self.snn = snn_network
 
         self.ann = nn.Sequential(
             nn.Linear(60, 32),
@@ -125,47 +113,90 @@ class Hybrid_Net(nn.Module):
             nn.Linear(32, 16),
             nn.LayerNorm(16),
             nn.LeakyReLU(),
-            nn.Linear(16, 4)
+            nn.Linear(16, 4) 
         )
-
         self.softmax = nn.LogSoftmax(dim=1)
-        self.snn = snn_network
 
     def forward(self, data):
-
         features_t = self.snn(data)
 
         features = features_t.sum(dim=0)
 
         logits = self.ann(features)
-
         probs = self.softmax(logits)
 
-        return probs
+        return probs, features_t
 
-dataset = ds.build_dataset( path="./Data/PrimaryOnly/Uniform", max_files=10000, primary_only = True, target="particle")
+
+class LossClasificacionRegularizada(nn.Module):
+    def __init__(self, alpha=1.0, beta=0.01):
+        super().__init__()
+        self.alpha = alpha  
+        self.beta = beta  
+        self.loss_cls = nn.NLLLoss()
+
+    def forward(self, outputs, target_cls):
+        probs, features_t = outputs
+        
+        l_cls = self.loss_cls(probs, target_cls)
+        l_reg = torch.mean(features_t) 
+        
+        return self.alpha * l_cls + self.beta * l_reg
+
+dataset = ds.build_dataset( path="./Data/PrimaryOnly/Uniform", max_files=10000, primary_only = True, target=["particle","energy","centroid","dispersion"])
 
 train_loader, test_loader, val_loader = ds.build_loaders(dataset, split=(0.7, 0.15), batch_size=batch_size, shuffle=True)
+
+def comp_accuracy(probs, targets, *args, **kwargs):
+    predicted = probs.argmax(dim=1)
+    correct = (predicted == targets).to(torch.float32)
+    return correct
 
 net_Epos_spk = snnfn.Spiking_Net(net_desc_spikefreq, spikegen_multi)
 modelo_completo = Hybrid_Net(net_Epos_spk)
 
+loss_combinada = LossClasificacionRegularizada(alpha=1.0, beta=0.01)
+
 Pred_Epos_spk = snnfn.Predictor(predict_spikefreq, comp_accuracy)
-#loss_Epos = nn.CrossEntropyLoss()
-loss_Epos = nn.NLLLoss()
 opt_Epos_spk = torch.optim.Adam(modelo_completo.parameters(), lr=5e-3, betas=(0.9, 0.999), weight_decay=0)
+
 sche_Epos_spk = torch.optim.lr_scheduler.ExponentialLR(opt_Epos_spk, gamma=0.9)
-train_Epos_spk = snnfn.Trainer(modelo_completo, loss_Epos, opt_Epos_spk, Pred_Epos_spk,
+train_Epos_spk = snnfn.Trainer(modelo_completo, loss_combinada, opt_Epos_spk, Pred_Epos_spk,
                     train_loader, val_loader, test_loader, task = "Accuracy")
 
 train_Epos_spk.train(num_epochs)
 train_Epos_spk.predict.accuracy_fn = lambda p, t: comp_accuracy(p, t)
 train_Epos_spk.test("test")
+train_Epos_spk.predict.accuracy_fn = lambda p, t: comp_accuracy(p, t)
+
+
+train_epochs = sorted(train_Epos_spk.loss_hist["train"].keys())
+train_loss_curve = [np.mean(train_Epos_spk.loss_hist["train"][e]) for e in train_epochs]
+val_epochs = sorted(train_Epos_spk.loss_hist["validation"].keys())
+val_loss_curve = [train_Epos_spk.loss_hist["validation"][e] for e in val_epochs]
+val_acc_curve = [train_Epos_spk.acc_hist["validation"][e] for e in val_epochs]
+
+fig_tc, axes_tc = plt.subplots(1, 2, figsize=(12, 5))
+
+axes_tc[0].plot([e + 1 for e in train_epochs], train_loss_curve, label="Train")
+axes_tc[0].plot(val_epochs, val_loss_curve, label="Val")
+axes_tc[0].set_title("Pérdida (NLL regularizada)"); axes_tc[0].set_xlabel("Época")
+axes_tc[0].legend(); axes_tc[0].grid(alpha=0.3)
+
+axes_tc[1].plot(val_epochs, val_acc_curve)
+axes_tc[1].set_title("Exactitud clasificación (val)"); axes_tc[1].set_xlabel("Época")
+axes_tc[1].grid(alpha=0.3)
+
+fig_tc.tight_layout()
+fig_tc.savefig("training_curves_SNN_ANN_50_epocas.png", dpi=300, bbox_inches="tight")
+plt.close(fig_tc)
+
+
 cm_metric = train_Epos_spk.ConfusionMatrix(num_classes=4)
 cm = cm_metric.compute().cpu().numpy()
 np.savetxt("confusion_matrix.txt", cm, fmt="%d")
 
-# Plot de la matriz de confusión
+
 fig_cm, ax_cm = plt.subplots(figsize=(6, 5))
 im = ax_cm.imshow(cm, interpolation="nearest", cmap="Blues")
 fig_cm.colorbar(im, ax=ax_cm)
@@ -180,7 +211,6 @@ ax_cm.set_yticks(tick_marks)
 ax_cm.set_xticklabels(["proton", "kaon", "pion"], rotation=45, ha="right")
 ax_cm.set_yticklabels(["proton", "kaon", "pion"])
 
-# Anotar valores en cada celda
 for i in range(cm.shape[0]):
     for j in range(cm.shape[1]):
         ax_cm.text(
@@ -189,13 +219,11 @@ for i in range(cm.shape[0]):
             int(cm[i, j]),
             ha="center",
             va="center",
-            color="white" if cm[i, j] > cm.max() / 2.0 else "black",
+            color="white" if im.norm(cm[i, j]) > 0.5 else "black",
         )
 
 fig_cm.tight_layout()
-fig_cm.savefig("confusion_matrix_SNN_40_epocas.png", dpi=300, bbox_inches="tight")
-
-
+fig_cm.savefig("confusion_matrix_SNN_ANN_50_epocas.png", dpi=300, bbox_inches="tight")
 
 modelo_completo.eval()
 
@@ -205,9 +233,16 @@ all_targets = []
 with torch.no_grad():
     for data_batch, targets_batch in test_loader:
         data_batch = data_batch.to(snnfn.device)
+        
+        if isinstance(targets_batch, list):
+            targets_batch = targets_batch[0]
+            
+        if not isinstance(targets_batch, torch.Tensor):
+            targets_batch = torch.tensor(targets_batch, dtype=torch.long)
+            
         targets_batch = targets_batch.to(snnfn.device)
 
-        log_probs = modelo_completo(data_batch)
+        log_probs, features_t = modelo_completo(data_batch)
 
         probs = torch.exp(log_probs)
 
@@ -217,9 +252,7 @@ with torch.no_grad():
 all_probs = torch.cat(all_probs, dim=0).numpy()      
 all_targets = torch.cat(all_targets, dim=0).numpy()  
 
-
 class_names = ["proton", "kaon", "pion"]
-
 
 fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharex=True, sharey=True)
 axes = axes.flatten()
@@ -228,11 +261,11 @@ for true_cls in range(3):
     ax = axes[true_cls]
     mask = (all_targets == true_cls)
 
-    print(mask.sum())
+    print(f"Total eventos de {class_names[true_cls]}: {mask.sum()}")
     for pred_cls in range(3):
         ax.hist(
             all_probs[mask, pred_cls],
-            bins=1000,
+            bins=100, 
             range=(0.0, 1.0),
             density=True,
             histtype="step",
@@ -248,10 +281,6 @@ for true_cls in range(3):
 
 fig.suptitle("Distribución de probabilidades predichas condicionada a la clase real", y=0.98)
 fig.tight_layout()
-fig.savefig("probabilidades.png", dpi=300, bbox_inches="tight")
-print("terminado")
+fig.savefig("probabilidades_SNN_ANN_50_epocas.png", dpi=300, bbox_inches="tight")
+print("Terminado")
 plt.close(fig)
-
-
-
-
